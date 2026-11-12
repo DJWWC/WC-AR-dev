@@ -87,18 +87,33 @@
           </select>
         </div>
 
+        <div>
+          <label>Pattern</label>
+          <select id="mode">
+            <option value="fill" selected>Tile across whole floor</option>
+            <option value="single">Single tile (actual size)</option>
+          </select>
+        </div>
+
+        <div>
+          <label>Tile width (mm)</label>
+          <input id="tileMm" type="number" step="10" min="50" value="1000">
+        </div>
+
         <div style="align-self:end;">
           <button id="apply">Apply size + tiling</button>
         </div>
       </div>
       <div id="status">Please select a carpet from the dropdown.</div>
+      <div id="scaleInfo" style="color:#94a3b8;font-size:12px;margin-top:4px"></div>
       <div id="caps" style="color:#94a3b8;font-size:12px;margin-top:4px"></div>
     </div>
 
     <model-viewer
       id="mv"
-      src="https://djwwc.github.io/WC-AR/rug_plane_blank.glb"
+      src="./rug_plane_blank.glb"
       ar
+      ar-scale="fixed"
       ar-modes="scene-viewer quick-look webxr"
       ar-placement="floor"
       camera-controls
@@ -144,9 +159,12 @@
   const status      = document.getElementById('status');
   const arTopBtn    = document.getElementById('arTopBtn');
   const capsEl      = document.getElementById('caps');
+  const modeSel     = document.getElementById('mode');
+  const tileMm      = document.getElementById('tileMm');
+  const scaleInfo   = document.getElementById('scaleInfo');
 
   // Absolute GLB to feed Scene Viewer (native AR) every time we launch AR
-  const ABS_GLB = "https://djwwc.github.io/WC-AR/rug_plane_blank.glb";
+  const ABS_GLB = new URL("rug_plane_blank.glb", location.href).href;
 
   // (Optional) capability hint
   (async () => {
@@ -182,8 +200,17 @@
   }
 
   function clamp(n, a=0.5, b=100) { n = Number(n)||0; return Math.min(b, Math.max(a, n)); }
+  function clampMm(n) { n = Number(n)||1000; return Math.min(20000, Math.max(50, n)); }
+
+  // Tufts are square, so tile height follows from the image's pixel aspect.
+  let tileAspect = 1; // tile height / tile width
+  function tileSizeM() { const wM = clampMm(tileMm.value)/1000; return { wM, hM: wM*tileAspect }; }
+
   function applySizeRot() {
-    const W = clamp(w.value), H = clamp(h.value), deg = Number(rot.value)||0;
+    const deg = Number(rot.value)||0;
+    let W, H;
+    if (modeSel.value === 'single') { const t = tileSizeM(); W = t.wM; H = t.hM; }
+    else { W = clamp(w.value); H = clamp(h.value); }
     mv.scale = `${W} 0.001 ${H}`;
     mv.orientation = `0 ${deg*Math.PI/180} 0`;
   }
@@ -199,58 +226,49 @@
     return { img, revoke: () => URL.revokeObjectURL(obj) };
   }
 
+  // Returns a drawable at <= maxSide, tagged with origW (the source image's pixel width).
   async function prepareTile(url, maxSide=2048) {
     const { img, revoke } = await fetchImage(url);
     try {
       const w0 = img.width, h0 = img.height;
-      if (Math.max(w0, h0) <= maxSide) return img;
-      const s = maxSide / Math.max(w0, h0);
+      const s = Math.min(1, maxSide / Math.max(w0, h0));
       const W = Math.max(2, Math.round(w0*s)), H = Math.max(2, Math.round(h0*s));
       const c = document.createElement('canvas'); c.width = W; c.height = H;
       c.getContext('2d').drawImage(img, 0, 0, W, H);
-      const out = new Image(); out.src = c.toDataURL('image/jpeg', 0.9); await out.decode();
-      return out;
+      c.origW = w0;
+      return c;
     } finally { revoke(); }
   }
 
-  // Bake with lighting look
-  async function bakeTiledTexture(tileURL, roomWm, roomHm, lighting='natural') {
-    const repsX = Math.max(1, Math.round(roomWm));
-    const repsY = Math.max(1, Math.round(roomHm));
-    const tile = await prepareTile(tileURL, 2048);
-
-    const tW = tile.width, tH = tile.height;
-    const wantW = repsX * tW, wantH = repsY * tH;
+  // Bake the floor texture at true physical scale.
+  //   single: canvas = one tile, plane is scaled to the tile's real size.
+  //   fill:   canvas = whole floor, tile repeated at its real size (no whole-metre rounding).
+  async function bakeTexture(tileURL, mode, roomW, roomH, tileWm, lighting='natural') {
     const MAX = 4096;
-    const scale = Math.min(1, MAX / Math.max(wantW, wantH));
-    const outW = Math.max(8, Math.floor(wantW * scale));
-    const outH = Math.max(8, Math.floor(wantH * scale));
-    const drawW = Math.max(1, Math.floor(tW * scale));
-    const drawH = Math.max(1, Math.floor(tH * scale));
+    const tile = await prepareTile(tileURL, 2048);
+    tileAspect = tile.height / tile.width;
+    const tileHm = tileWm * tileAspect;
+    const floorW = mode === 'single' ? tileWm : roomW;
+    const floorH = mode === 'single' ? tileHm : roomH;
+    const nativePpm = tile.width / tileWm;                  // texture px per metre at full resolution
+    const ppm = Math.min(nativePpm, MAX / Math.max(floorW, floorH));
+    const outW = Math.max(8, Math.round(floorW * ppm));
+    const outH = Math.max(8, Math.round(floorH * ppm));
 
     const c = document.createElement('canvas'); c.width = outW; c.height = outH;
     const ctx = c.getContext('2d');
-
-    // subtle, believable presets
     switch (lighting) {
-      case 'bulb':
-        ctx.filter = 'brightness(1.05) saturate(1.08) sepia(0.08) hue-rotate(5deg)';
-        break;
-      case 'dark':
-        ctx.filter = 'brightness(0.85) contrast(0.95) saturate(0.95)';
-        break;
-      case 'natural':
-      default:
-        ctx.filter = 'none';
+      case 'bulb': ctx.filter = 'brightness(1.05) saturate(1.08) sepia(0.08) hue-rotate(5deg)'; break;
+      case 'dark': ctx.filter = 'brightness(0.85) contrast(0.95) saturate(0.95)'; break;
+      default:     ctx.filter = 'none';
     }
-
-    for (let y = 0; y < repsY; y++) {
-      for (let x = 0; x < repsX; x++) {
-        ctx.drawImage(tile, x*drawW, y*drawH, drawW, drawH);
-      }
-    }
+    const sx = tileWm * ppm / tile.width, sy = tileHm * ppm / tile.height;
+    ctx.setTransform(sx, 0, 0, sy, 0, 0);
+    if (mode === 'single') ctx.drawImage(tile, 0, 0);
+    else { ctx.fillStyle = ctx.createPattern(tile, 'repeat'); ctx.fillRect(0, 0, outW / sx, outH / sy); }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.filter = 'none';
-    return c.toDataURL('image/jpeg', 0.92);
+    return { url: c.toDataURL('image/jpeg', 0.92), origW: tile.origW, tileWm, tileHm };
   }
 
   async function ensureBakedAndApply() {
@@ -260,18 +278,23 @@
       return;
     }
 
+    const mode = modeSel.value;
     const Wm = clamp(w.value), Hm = clamp(h.value);
+    const tileWm = clampMm(tileMm.value) / 1000;
     const lighting = (lightingSel?.value) || 'natural';
-    const key = `${Wm}x${Hm}:${TILE_URL}:L=${lighting}`;
+    const key = `${mode}:${Wm}x${Hm}:T=${tileWm}:${TILE_URL}:L=${lighting}`;
     if (bakedKey === key) return;
 
-    status.textContent = 'Baking tiled texture…';
+    status.textContent = 'Baking texture…';
     try {
-      const bakedURL = await bakeTiledTexture(TILE_URL, Wm, Hm, lighting);
-      const tex = await mv.createTexture(bakedURL);
+      const r = await bakeTexture(TILE_URL, mode, Wm, Hm, tileWm, lighting);
+      const tex = await mv.createTexture(r.url);
       mat.pbrMetallicRoughness.baseColorTexture.setTexture(tex);
+      applySizeRot();
       bakedKey = key;
-      lastBakedURL = bakedURL; // remember for preview restore
+      lastBakedURL = r.url;
+      const mmPx = (r.tileWm * 1000 / r.origW).toFixed(2);
+      scaleInfo.textContent = `Tile = ${(r.tileWm*1000).toFixed(0)} × ${(r.tileHm*1000).toFixed(0)} mm · 1 source pixel = ${mmPx} mm (tuft ≈ 3–4 mm)`;
       status.textContent = 'Texture applied ✅';
     } catch (e) {
       console.error('Bake/apply failed:', e);
@@ -293,17 +316,15 @@
   // Always launch native AR on Android (Scene Viewer intent).
 // Keep the baked texture in the page preview; native AR loads the GLB by URL.
 async function launchNativeAR() {
-  const ABS_GLB = "https://djwwc.github.io/WC-AR/rug_plane_blank.glb";
   const isAndroid = /Android/i.test(navigator.userAgent);
 
   // Make sure <model-viewer> points to an absolute HTTPS model for native AR.
   // (Doesn't remove your baked preview texture anymore.)
-  if (mv.src !== ABS_GLB) mv.src = ABS_GLB;
   mv.setAttribute('ar-modes', 'scene-viewer quick-look webxr');
 
   if (isAndroid) {
     // Open Scene Viewer directly via intent (most reliable path to native AR + occlusion)
-    const intent = `intent://arvr.google.com/scene-viewer/1.0?file=${encodeURIComponent(ABS_GLB)}&mode=ar_only#Intent;scheme=https;package=com.google.android.googlequicksearchbox;end;`;
+    const intent = `intent://arvr.google.com/scene-viewer/1.0?file=${encodeURIComponent(ABS_GLB)}&mode=ar_only&resizable=false#Intent;scheme=https;package=com.google.android.googlequicksearchbox;end;`;
     window.location.href = intent;
     return;
   }
@@ -335,6 +356,15 @@ async function launchNativeAR() {
     bakedKey = null;
     await ensureBakedAndApply();
   });
+
+  function onModeOrTile() {
+    w.disabled = h.disabled = modeSel.value === 'single';
+    bakedKey = null;
+    applySizeRot();
+    return ensureBakedAndApply();
+  }
+  modeSel.addEventListener('change', onModeOrTile);
+  tileMm.addEventListener('change', onModeOrTile);
 
   lightingSel.addEventListener('change', async () => {
     bakedKey = null;
