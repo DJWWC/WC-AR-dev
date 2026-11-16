@@ -140,8 +140,12 @@
 
 <script type="module">
   const CAL = 'calibration';
+  const ROLL_CAL = 'rolltest';
+  // type 'roll': image height = roll width (rollWidthMm, max 4 m); pattern repeats along the image's X axis only.
+  // To add a roll design: {name:'...', url:'./Textures/File.jpg', type:'roll', rollWidthMm:4000}
   const STOCK = [
     {name:'Calibration grid (1 m, 100 mm squares)', url:CAL},
+    {name:'Roll test pattern (4 m wide, 6 m repeat)', url:ROLL_CAL, type:'roll', rollWidthMm:4000},
     {name:'Berwick Whitsome',      url:'./Textures/Berwick_Whitsome.jpg'},
     {name:'Chesil Ammonite',       url:'./Textures/Chesil_Ammonite.jpg'},
     {name:'Chesil Barnacle',       url:'./Textures/Chesil_Barnacle.jpg'},
@@ -219,13 +223,24 @@
 
   // Tufts are square, so tile height follows from the image's pixel aspect.
   let tileAspect = 1; // tile height / tile width
-  function tileSizeM() { const wM = clampMm(tileMm.value)/1000; return { wM, hM: wM*tileAspect }; }
+  function curEntry() { return STOCK.find(d => d.url === TILE_URL) || null; }
+  function rollWidthM(en) { return (en?.rollWidthMm || 4000) / 1000; }
+  // Room length is limited to the roll width for roll designs.
+  function effectiveH() {
+    const en = curEntry(), H = clamp(h.value);
+    return en?.type === 'roll' ? Math.min(H, rollWidthM(en)) : H;
+  }
+  function tileSizeM() {
+    const en = curEntry();
+    if (en?.type === 'roll') { const hM = rollWidthM(en); return { wM: hM / tileAspect, hM }; }
+    const wM = clampMm(tileMm.value)/1000; return { wM, hM: wM*tileAspect };
+  }
 
   function applySizeRot() {
     const deg = Number(rot.value)||0;
     let W, H;
     if (modeSel.value === 'single') { const t = tileSizeM(); W = t.wM; H = t.hM; }
-    else { W = clamp(w.value); H = clamp(h.value); }
+    else { W = clamp(w.value); H = effectiveH(); }
     mv.scale = `${W} 0.001 ${H}`;
     mv.orientation = `0 ${deg*Math.PI/180} 0`;
   }
@@ -261,6 +276,26 @@
     return c;
   }
 
+  // Synthetic roll test: 6 m repeat (X) by 4 m roll width (Y), 250 px per metre.
+  function makeRollTestTile() {
+    const W = 1500, H = 1000;
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#efece4'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#b4b0a4'; ctx.lineWidth = 3;
+    for (let x = 250; x < W; x += 250) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 250; y < H; y += 250) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    ctx.fillStyle = '#d33'; ctx.fillRect(0, 0, W, 10); ctx.fillRect(0, H - 10, W, 10);   // roll edges
+    ctx.fillStyle = '#2b6cb0'; ctx.fillRect(0, 0, 12, H);                                 // repeat starts here
+    ctx.fillStyle = '#2f2c27'; ctx.font = 'bold 30px sans-serif'; ctx.textAlign = 'left';
+    for (let i = 1; i < 6; i++) ctx.fillText(i + ' m', i * 250 + 8, 50);
+    for (let j = 1; j < 4; j++) ctx.fillText(j + ' m', 22, j * 250 - 10);
+    ctx.textAlign = 'center'; ctx.font = 'bold 72px sans-serif'; ctx.fillText('ROLL 4 m wide', W / 2, 480);
+    ctx.font = 'bold 44px sans-serif'; ctx.fillText('6 m repeat → (blue line = repeat start)', W / 2, 550);
+    c.origW = W;
+    return c;
+  }
+
   // Real-world reference objects, drawn at true size at the centre of the floor.
   const REFS = {
     a4:    { w: 297,  h: 210, label: 'A4 sheet 297 × 210 mm' },
@@ -293,6 +328,7 @@
   // Returns a drawable at <= maxSide, tagged with origW (the source image's pixel width).
   async function prepareTile(url, maxSide=2048) {
     if (url === CAL) return makeCalibrationTile();
+    if (url === ROLL_CAL) return makeRollTestTile();
     const { img, revoke } = await fetchImage(url);
     try {
       const w0 = img.width, h0 = img.height;
@@ -308,13 +344,16 @@
   // Bake the floor texture at true physical scale.
   //   single: canvas = one tile, plane is scaled to the tile's real size.
   //   fill:   canvas = whole floor, tile repeated at its real size (no whole-metre rounding).
-  async function bakeTexture(tileURL, mode, roomW, roomH, tileWm, lighting='natural', ref='') {
+  async function bakeTexture(tileURL, mode, roomW, roomH, tileWm, lighting='natural', ref='', entry=null) {
     const MAX = 4096;
     const tile = await prepareTile(tileURL, 2048);
     tileAspect = tile.height / tile.width;
-    const tileHm = tileWm * tileAspect;
+    const isRoll = entry?.type === 'roll';
+    const rollM = rollWidthM(entry);
+    if (isRoll) tileWm = rollM / tileAspect;               // image height = roll width
+    const tileHm = isRoll ? rollM : tileWm * tileAspect;
     const floorW = mode === 'single' ? tileWm : roomW;
-    const floorH = mode === 'single' ? tileHm : roomH;
+    const floorH = mode === 'single' ? tileHm : (isRoll ? Math.min(roomH, rollM) : roomH);
     const nativePpm = tile.width / tileWm;                  // texture px per metre at full resolution
     const ppm = Math.min(nativePpm, MAX / Math.max(floorW, floorH));
     const outW = Math.max(8, Math.round(floorW * ppm));
@@ -328,8 +367,10 @@
       default:     ctx.filter = 'none';
     }
     const sx = tileWm * ppm / tile.width, sy = tileHm * ppm / tile.height;
-    ctx.setTransform(sx, 0, 0, sy, 0, 0);
+    const offY = (isRoll && mode !== 'single') ? (floorH - tileHm) * ppm / 2 : 0;   // centre the cut across the roll
+    ctx.setTransform(sx, 0, 0, sy, 0, offY);
     if (mode === 'single') ctx.drawImage(tile, 0, 0);
+    else if (isRoll) { ctx.fillStyle = ctx.createPattern(tile, 'repeat-x'); ctx.fillRect(0, 0, outW / sx, tile.height); }
     else { ctx.fillStyle = ctx.createPattern(tile, 'repeat'); ctx.fillRect(0, 0, outW / sx, outH / sy); }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.filter = 'none';
@@ -345,7 +386,11 @@
     }
 
     const mode = modeSel.value;
-    const Wm = clamp(w.value), Hm = clamp(h.value);
+    const entry = curEntry();
+    const isRoll = entry?.type === 'roll';
+    const Wm = clamp(w.value), Hm = effectiveH();
+    const capped = isRoll && clamp(h.value) > Hm;
+    if (isRoll) h.value = Hm;
     const tileWm = TILE_URL === CAL ? 1 : clampMm(tileMm.value) / 1000;
     const ref = refSel.value;
     const lighting = (lightingSel?.value) || 'natural';
@@ -354,7 +399,7 @@
 
     status.textContent = 'Baking texture…';
     try {
-      const r = await bakeTexture(TILE_URL, mode, Wm, Hm, tileWm, lighting, ref);
+      const r = await bakeTexture(TILE_URL, mode, Wm, Hm, tileWm, lighting, ref, entry);
       const tex = await mv.createTexture(r.url);
       mat.pbrMetallicRoughness.baseColorTexture.setTexture(tex);
       applySizeRot();
@@ -362,8 +407,9 @@
       lastBakedURL = r.url;
       const mmPx = (r.tileWm * 1000 / r.origW).toFixed(2);
       if (TILE_URL === CAL) scaleInfo.textContent = 'Calibration grid: thin lines every 100 mm, heavy lines every 500 mm, 1 m repeat. Compare with a tape measure.';
+      else if (isRoll) scaleInfo.textContent = `Roll ${r.tileHm.toFixed(1)} m wide · pattern repeats every ${(r.tileWm*1000).toFixed(0)} mm along the roll · 1 source pixel = ${mmPx} mm`;
       else scaleInfo.textContent = `Tile = ${(r.tileWm*1000).toFixed(0)} × ${(r.tileHm*1000).toFixed(0)} mm · 1 source pixel = ${mmPx} mm (tuft ≈ 3–4 mm)`;
-      status.textContent = 'Texture applied ✅';
+      status.textContent = capped ? `Texture applied ✅ — room length limited to ${rollWidthM(entry)} m (roll width)` : 'Texture applied ✅';
     } catch (e) {
       console.error('Bake/apply failed:', e);
       status.textContent = '❌ Failed to apply texture.';
@@ -422,7 +468,10 @@ async function launchNativeAR() {
   designSel.addEventListener('change', async (e) => {
     TILE_URL = e.target.value || null;
     if (TILE_URL === CAL) tileMm.value = 1000;
-    tileMm.disabled = TILE_URL === CAL;
+    const en = curEntry(), roll = en?.type === 'roll';
+    tileMm.disabled = TILE_URL === CAL || roll;
+    h.max = roll ? rollWidthM(en) : 100;
+    if (roll) h.value = Math.min(Number(h.value) || 0, rollWidthM(en));
     bakedKey = null;
     await ensureBakedAndApply();
   });
