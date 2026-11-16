@@ -141,7 +141,8 @@
 <script type="module">
   const CAL = 'calibration';
   const ROLL_CAL = 'rolltest';
-  // type 'roll': image height = roll width (rollWidthMm, max 4 m); pattern repeats along the image's X axis only.
+  // type 'roll': image WIDTH = roll width (rollWidthMm, max 4 m); the pattern repeats down the image HEIGHT only.
+  // The image is rotated at load so the repeat runs along the room width (X) and the 4 m spans the room length.
   // To add a roll design: {name:'...', url:'./Textures/File.jpg', type:'roll', rollWidthMm:4000}
   const STOCK = [
     {name:'Calibration grid (1 m, 100 mm squares)', url:CAL},
@@ -276,23 +277,38 @@
     return c;
   }
 
-  // Synthetic roll test: 6 m repeat (X) by 4 m roll width (Y), 250 px per metre.
+  // Rotate a canvas 90 deg anticlockwise: source X (roll width) becomes the vertical axis,
+  // source Y (pattern repeat) becomes the horizontal axis. origW = source pixels along the repeat.
+  function rotateCCW(src) {
+    const nc = document.createElement('canvas'); nc.width = src.height; nc.height = src.width;
+    const ctx = nc.getContext('2d');
+    ctx.translate(0, nc.height); ctx.rotate(-Math.PI / 2); ctx.drawImage(src, 0, 0);
+    nc.origW = src.origH || src.height;
+    return nc;
+  }
+
+  // Synthetic roll test in the real roll orientation: 1000 px wide = 4 m roll width (250 px/m),
+  // 1500 px tall = 6 m repeat. Text is drawn rotated so it reads upright once placed on the floor.
   function makeRollTestTile() {
-    const W = 1500, H = 1000;
+    const W = 1000, H = 1500;
     const c = document.createElement('canvas'); c.width = W; c.height = H;
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#efece4'; ctx.fillRect(0, 0, W, H);
     ctx.strokeStyle = '#b4b0a4'; ctx.lineWidth = 3;
     for (let x = 250; x < W; x += 250) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
     for (let y = 250; y < H; y += 250) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
-    ctx.fillStyle = '#d33'; ctx.fillRect(0, 0, W, 10); ctx.fillRect(0, H - 10, W, 10);   // roll edges
-    ctx.fillStyle = '#2b6cb0'; ctx.fillRect(0, 0, 12, H);                                 // repeat starts here
-    ctx.fillStyle = '#2f2c27'; ctx.font = 'bold 30px sans-serif'; ctx.textAlign = 'left';
-    for (let i = 1; i < 6; i++) ctx.fillText(i + ' m', i * 250 + 8, 50);
-    for (let j = 1; j < 4; j++) ctx.fillText(j + ' m', 22, j * 250 - 10);
-    ctx.textAlign = 'center'; ctx.font = 'bold 72px sans-serif'; ctx.fillText('ROLL 4 m wide', W / 2, 480);
-    ctx.font = 'bold 44px sans-serif'; ctx.fillText('6 m repeat → (blue line = repeat start)', W / 2, 550);
-    c.origW = W;
+    ctx.fillStyle = '#d33'; ctx.fillRect(0, 0, 10, H); ctx.fillRect(W - 10, 0, 10, H);   // roll edges
+    ctx.fillStyle = '#2b6cb0'; ctx.fillRect(0, 0, W, 12);                                 // repeat starts here
+    const txt = (str, x, y, size, align) => {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI / 2);
+      ctx.font = `bold ${size}px sans-serif`; ctx.textAlign = align; ctx.fillStyle = '#2f2c27';
+      ctx.fillText(str, 0, 0); ctx.restore();
+    };
+    for (let i = 1; i < 6; i++) txt(i + ' m', 40, i * 250 + 8, 30, 'left');           // along the roll
+    for (let j = 1; j < 4; j++) txt(j + ' m', j * 250 + 8, 700, 30, 'left');           // across the roll
+    txt('ROLL 4 m wide', W / 2 - 30, 750, 72, 'center');
+    txt('6 m repeat \u2192 (blue line = repeat start)', W / 2 + 50, 750, 40, 'center');
+    c.origW = W; c.origH = H;
     return c;
   }
 
@@ -326,9 +342,9 @@
   }
 
   // Returns a drawable at <= maxSide, tagged with origW (the source image's pixel width).
-  async function prepareTile(url, maxSide=2048) {
+  async function prepareTile(url, maxSide=2048, rotate=false) {
     if (url === CAL) return makeCalibrationTile();
-    if (url === ROLL_CAL) return makeRollTestTile();
+    if (url === ROLL_CAL) return rotateCCW(makeRollTestTile());
     const { img, revoke } = await fetchImage(url);
     try {
       const w0 = img.width, h0 = img.height;
@@ -336,8 +352,8 @@
       const W = Math.max(2, Math.round(w0*s)), H = Math.max(2, Math.round(h0*s));
       const c = document.createElement('canvas'); c.width = W; c.height = H;
       c.getContext('2d').drawImage(img, 0, 0, W, H);
-      c.origW = w0;
-      return c;
+      c.origW = w0; c.origH = h0;
+      return rotate ? rotateCCW(c) : c;
     } finally { revoke(); }
   }
 
@@ -346,7 +362,7 @@
   //   fill:   canvas = whole floor, tile repeated at its real size (no whole-metre rounding).
   async function bakeTexture(tileURL, mode, roomW, roomH, tileWm, lighting='natural', ref='', entry=null) {
     const MAX = 4096;
-    const tile = await prepareTile(tileURL, 2048);
+    const tile = await prepareTile(tileURL, 2048, entry?.type === 'roll');
     tileAspect = tile.height / tile.width;
     const isRoll = entry?.type === 'roll';
     const rollM = rollWidthM(entry);
